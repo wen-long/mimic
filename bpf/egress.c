@@ -166,6 +166,12 @@ int egress_handler(struct __sk_buff* skb) {
     seq = conn->seq;
     ack_seq = conn->ack_seq;
     conn->seq += payload_len + padding;
+    // Account for padding in TCP sequence space when pad300 is enabled
+    if (conn_pad300(conn)) {
+      __u32 post_ip_len = (skb->len - l2_end) + TCP_UDP_HEADER_DIFF + padding;
+      if (post_ip_len < 320)
+        conn->seq += 324 - post_ip_len;
+    }
   } else {
     if (conn->state == CONN_IDLE) {
       __u32 cooldown = conn_cooldown(conn);
@@ -249,6 +255,67 @@ int egress_handler(struct __sk_buff* skb) {
   bpf_l4_csum_replace(skb, csum_off, 0, csum_diff, BPF_F_PSEUDO_HDR);
 
   mimic_change_csum_offset(skb, IPPROTO_TCP);
+
+  // Pad IP packet to 324 bytes if pad300 enabled and smaller than 320
+  if (conn_pad300(conn)) {
+    __u32 ip_len = skb->len - l2_end;
+    if (ip_len < 320) {
+      __u32 pad_len = 324 - ip_len;
+      __u32 zero_len = pad_len - 4;
+
+      // Update IP headers before changing tail (use skb helpers to avoid stale pointers)
+      if (ipv4) {
+        __be16 new_tot_len = htons(324);
+        __be16 old_tot_len = htons((__u16)ip_len);
+        try_shot(bpf_skb_store_bytes(skb, l2_end + offsetof(struct iphdr, tot_len), &new_tot_len, 2, 0));
+        try_shot(bpf_l3_csum_replace(skb, l2_end + IPV4_CSUM_OFF, old_tot_len, new_tot_len, 2));
+      }
+      if (ipv6) {
+        __be16 new_payload_len = htons(324 - sizeof(struct ipv6hdr));
+        try_shot(bpf_skb_store_bytes(skb, l2_end + offsetof(struct ipv6hdr, payload_len),
+                                     &new_payload_len, 2, 0));
+      }
+
+      __u32 old_skb_len = skb->len;
+      __be16 pad_len_be = htons((__u16)pad_len);
+      __be16 marker_pair[2] = {pad_len_be, pad_len_be};
+      try_shot(bpf_skb_change_tail(skb, old_skb_len + pad_len, 0));
+
+      // Update TCP checksum: pseudo-header length changed + padding data added
+      {
+        __u32 ip_hdr_len = ip_end - l2_end;
+        __be16 old_tcp_len = htons((__u16)(ip_len - ip_hdr_len));
+        __be16 new_tcp_len = htons(324 - ip_hdr_len);
+        struct ph_part old_ph2 = {.protocol = IPPROTO_TCP, .len = old_tcp_len};
+        struct ph_part new_ph2 = {.protocol = IPPROTO_TCP, .len = new_tcp_len};
+        __be32 tcp_fix = bpf_csum_diff((__be32*)&old_ph2, sizeof(old_ph2),
+                                       (__be32*)&new_ph2, sizeof(new_ph2), 0);
+        bpf_l4_csum_replace(skb, csum_off, 0, tcp_fix, BPF_F_PSEUDO_HDR);
+
+        __be32 marker_csum = bpf_csum_diff(NULL, 0, (__be32*)marker_pair, sizeof(marker_pair), 0);
+        bpf_l4_csum_replace(skb, csum_off, 0, marker_csum, 0);
+      }
+
+      // Write zero padding in 64-byte bounded chunks (verifier-friendly)
+      __u8 zeros[64] = {};
+      if (zero_len > 0)
+        try_shot(bpf_skb_store_bytes(skb, old_skb_len, zeros, min(zero_len, (__u32)64), 0));
+      if (zero_len > 64)
+        try_shot(bpf_skb_store_bytes(skb, old_skb_len + 64, zeros, min(zero_len - 64, (__u32)64), 0));
+      if (zero_len > 128)
+        try_shot(
+          bpf_skb_store_bytes(skb, old_skb_len + 128, zeros, min(zero_len - 128, (__u32)64), 0));
+      if (zero_len > 192)
+        try_shot(
+          bpf_skb_store_bytes(skb, old_skb_len + 192, zeros, min(zero_len - 192, (__u32)64), 0));
+      if (zero_len > 256)
+        try_shot(
+          bpf_skb_store_bytes(skb, old_skb_len + 256, zeros, min(zero_len - 256, (__u32)64), 0));
+
+      // Write two copies of pad_len as __be16 markers
+      try_shot(bpf_skb_store_bytes(skb, old_skb_len + zero_len, marker_pair, 4, 0));
+    }
+  }
 
   return TC_ACT_OK;
 }

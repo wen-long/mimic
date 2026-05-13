@@ -83,6 +83,7 @@ int show_overview(int ifindex, enum link_type link_type, int whitelist_fd,
   else if (gs->padding)
     fprintf(out, _(", padding %d"), gs->padding);
   if (gs->max_window) fprintf(out, _(", max window"));
+  if (gs->pad300) fprintf(out, _(", pad300"));
   fprintf(out, "\n");
 
   char buf[FILTER_FMT_MAX_LEN];
@@ -120,6 +121,8 @@ int show_overview(int ifindex, enum link_type link_type, int whitelist_fd,
     }
     if (a->max_window != b->max_window)
       fprintf(out, _(",max_window=%s"), info.settings.max_window ? "true" : "false");
+    if (a->pad300 != b->pad300)
+      fprintf(out, _(",pad300=%s"), info.settings.pad300 ? "true" : "false");
     if (strlen(info.host) != 0) fprintf(out, _(" %s(resolved from %s)"), RESET GRAY, info.host);
     fprintf(out, RESET "\n");
   }

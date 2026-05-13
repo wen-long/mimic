@@ -2,7 +2,7 @@
 
 #include "csum-hack.h"
 
-MODULE_VERSION("0.7.1");
+MODULE_VERSION("0.8.300");
 MODULE_DESCRIPTION("eBPF TCP -> UDP obfuscator - kernel module extension");
 MODULE_LICENSE("GPL");
 

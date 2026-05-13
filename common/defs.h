@@ -280,8 +280,9 @@ struct filter_settings {
       } keepalive, k; };
       __s16 padding;
       __s16 max_window;
+      __s16 pad300;
     };
-    __s16 array[8];
+    __s16 array[9];
   };
 };
 // clang-format on
@@ -300,10 +301,11 @@ static const struct filter_settings DEFAULT_SETTINGS = {
   .keepalive.array = {180, 10, 3, 600},
   .padding = 0,
   .max_window = false,
+  .pad300 = false,
 };
 
 static const struct filter_settings FALLBACK_SETTINGS = {
-  .array = {-1, -1, -1, -1, -1, -1, -1, -1},
+  .array = {-1, -1, -1, -1, -1, -1, -1, -1, -1},
 };
 
 static inline void filter_settings_apply(struct filter_settings* local,
@@ -396,6 +398,10 @@ static __always_inline __u32 conn_padding(struct connection* conn, __u32 seq, __
 
 static __always_inline __be32 conn_max_window(struct connection* conn) {
   return conn->settings.max_window ? TCP_MAX_WINDOW : 0;
+}
+
+static __always_inline bool conn_pad300(struct connection* conn) {
+  return conn->settings.pad300;
 }
 
 #define SECOND 1000000000ul

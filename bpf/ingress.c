@@ -159,11 +159,70 @@ int ingress_handler(struct xdp_md* xdp) {
     ip_payload_len = ntohs(ipv6->payload_len);
   }
 
+  __u32 de_pad_len = 0;
+
   if (ip_proto != IPPROTO_TCP) return XDP_PASS;
   decl_pass(struct tcphdr, tcp, ip_end, xdp);
 
   struct filter_settings* settings = matches_whitelist(QUARTET_TCP);
   if (!settings) return XDP_PASS;
+
+  // Check for padded packet (pad300: padded to 324 bytes, with pad_len markers at end).
+  // NAT64 shifts total_len by the IP header size difference (IPv6=40, IPv4=20).
+  // Use bpf_xdp_load_bytes to avoid verifier speculation on ipv4/ipv6 pointers.
+  {
+    __u8 buf[2];
+    __u8 ver_byte;
+    try_drop(bpf_xdp_load_bytes(xdp, l2_end, &ver_byte, 1));
+    __u8 ip_version = (ver_byte >> 4) & 0xf;
+    __u32 ip_total_len;
+    if (ip_version == 4) {
+      try_drop(bpf_xdp_load_bytes(xdp, l2_end + offsetof(struct iphdr, tot_len), buf, 2));
+      ip_total_len = ((__u16)buf[0] << 8) | buf[1];
+    } else {
+      try_drop(bpf_xdp_load_bytes(xdp, l2_end + offsetof(struct ipv6hdr, payload_len), buf, 2));
+      ip_total_len = sizeof(struct ipv6hdr) + (((__u16)buf[0] << 8) | buf[1]);
+    }
+
+    if ((ip_version == 4 && ip_total_len >= 304 && ip_total_len <= 324) ||
+        (ip_version == 6 && ip_total_len >= 324 && ip_total_len <= 344)) {
+      __u8 marker_buf[4];
+      try_drop(bpf_xdp_load_bytes(xdp, l2_end + ip_total_len - 4, marker_buf, 4));
+      __u16 val1 = ((__u16)marker_buf[0] << 8) | marker_buf[1];
+      __u16 val2 = ((__u16)marker_buf[2] << 8) | marker_buf[3];
+      if (val1 == val2 && val1 > 0 && val1 <= 320) {
+        __u32 pad_len = val1;
+        de_pad_len = pad_len;
+        if (ip_version == 4) {
+          try_drop(bpf_xdp_load_bytes(xdp, l2_end + IPV4_CSUM_OFF, buf, 2));
+          __u32 csum = (__u16)~((__u16)((buf[0] << 8) | buf[1]));
+          csum -= pad_len;
+          __u16 new_csum = csum_fold(csum);
+          buf[0] = new_csum >> 8;
+          buf[1] = new_csum & 0xff;
+          try_drop(bpf_xdp_store_bytes(xdp, l2_end + IPV4_CSUM_OFF, buf, 2));
+          __u16 new_tot_len = ip_total_len - pad_len;
+          buf[0] = new_tot_len >> 8;
+          buf[1] = new_tot_len & 0xff;
+          try_drop(bpf_xdp_store_bytes(xdp, l2_end + offsetof(struct iphdr, tot_len), buf, 2));
+        } else {
+          __u16 new_pl = ip_total_len - sizeof(struct ipv6hdr) - pad_len;
+          buf[0] = new_pl >> 8;
+          buf[1] = new_pl & 0xff;
+          try_drop(bpf_xdp_store_bytes(xdp, l2_end + offsetof(struct ipv6hdr, payload_len), buf, 2));
+        }
+        try_drop(bpf_xdp_adjust_tail(xdp, -(int)pad_len));
+        ip_payload_len -= pad_len;
+        // Re-validate IP and TCP pointers after adjust_tail invalidates them
+        if (ipv4)
+          redecl_drop(struct iphdr, ipv4, l2_end, xdp);
+        else if (ipv6)
+          redecl_drop(struct ipv6hdr, ipv6, l2_end, xdp);
+        redecl_drop(struct tcphdr, tcp, ip_end, xdp);
+      }
+    }
+  }
+
   struct conn_tuple conn_key = gen_conn_key(QUARTET_TCP);
   __u32 payload_len = ip_payload_len - (tcp->doff << 2);
 
@@ -321,7 +380,13 @@ int ingress_handler(struct xdp_md* xdp) {
         will_send_ctrl_packet = false;
       } else br_likely {
         will_send_ctrl_packet = will_drop = false;
-        conn->ack_seq = next_ack_seq(tcp, payload_len);
+        // Only count de_pad_len toward ACK when there is actual TCP payload.
+        // When payload_len == 0 (e.g. empty segment with PSH), the on-wire
+        // padding must not advance the acknowledgment sequence number.
+        __u32 ack_delta = payload_len;
+        if (payload_len > 0)
+          ack_delta += de_pad_len;
+        conn->ack_seq = next_ack_seq(tcp, ack_delta);
         __u32 upper_bound = DEFAULT_WINDOW / 2;
         __u32 lower_bound = DEFAULT_WINDOW / 4;
         if (random % (upper_bound - lower_bound) + lower_bound >= conn->window) {
@@ -401,6 +466,14 @@ int ingress_handler(struct xdp_md* xdp) {
   struct ph_part new_ph = {.protocol = IPPROTO_UDP, .len = udp->len};
   csum_diff = bpf_csum_diff((__be32*)&old_ph, sizeof(old_ph), (__be32*)&new_ph, sizeof(new_ph), 0);
   csum += u32_fold(ntohl(csum_diff));
+
+  // Remove pad300 contribution from checksum:
+  // The original TCP checksum covers padding data (2*de_pad_len from markers)
+  // and the padded pseudo-header length. The pseudo-header replacement above
+  // used the de-padded length, but the TCP checksum was computed with the
+  // padded length. Net: csum is 3*de_pad_len too high.
+  if (de_pad_len > 0)
+    csum -= 3 * de_pad_len;
 
   udp->check = htons(csum_fold(csum));
   if (udp->check == 0) udp->check = 0xffff;
