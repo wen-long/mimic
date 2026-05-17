@@ -4,14 +4,14 @@ include $(INCLUDE_DIR)/kernel.mk
 include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME := mimic
-PKG_VERSION := 0.7.0.20250831
-PKG_RELEASE := 4
+PKG_VERSION := 0.8.300
+PKG_RELEASE := 5
 
-commit := ad7a4b95867f48ada5a39881c2096251a222b9b8
+commit := df7ff04d56b0517a7dab1699560e97b428d9d4d4
 PKG_BUILD_DIR := $(BUILD_DIR)/mimic-$(commit)
 PKG_SOURCE := $(commit).tar.gz
-PKG_SOURCE_URL := https://github.com/hack3ric/mimic/archive/
-PKG_HASH := 4c2cd33045464572186d77b52c0de3b43484c82c18e9487b1026982f0aebf808
+PKG_SOURCE_URL := https://github.com/wen-long/mimic/archive/
+PKG_HASH := 05b025b5f296e3d691c7f0d33a0cfb5d8b79cc9a1256937a1aae64243d8a97b2
 
 PKG_BUILD_DEPENDS := argp-standalone bpf-headers bpftool/host
 
@@ -24,7 +24,7 @@ define Package/mimic
 	SECTION := net
 	CATEGORY := Network
 	TITLE := eBPF TCP -> UDP Obfuscator
-	URL := https://github.com/hack3ric/mimic
+	URL := https://github.com/wen-long/mimic
 	DEPENDS := +libbpf +libffi +kmod-sched-core +kmod-sched-bpf
 endef
 
